@@ -2,8 +2,12 @@ import cv2
 import numpy as np
 
 def pad(x, border = 4):
-    pad_x = np.zeros((32 + border * 2, 32 + border * 2, 3))
-    pad_x[border:32 + border, border : 32 + border, :] = x
+    # zero padding
+    # pad_x = np.zeros((32 + border * 2, 32 + border * 2, 3))
+    # pad_x[border:32 + border, border : 32 + border, :] = x
+
+    # reflect padding
+    pad_x = np.pad(x, [[border, border], [border, border], [0, 0]], mode = 'reflect')
     return pad_x
 
 def RandomPadandCrop(x):

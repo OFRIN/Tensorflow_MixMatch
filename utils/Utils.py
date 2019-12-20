@@ -78,7 +78,7 @@ def get_dataset(dataset_dir, n_label):
 
         image = cv2.merge((b, g, r))
         test_dataset.append([image, one_hot(label, 10)])
-
+    
     #########################################################
     # semi supervised learning (labeled / unlabeled) 
     #########################################################

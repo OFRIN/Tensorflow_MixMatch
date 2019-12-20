@@ -107,10 +107,8 @@ u_label_op = tf.stop_gradient(u_label_op)
 xu_image_op = tf.concat([x_image_var] + u_image_ops, axis = 0, name = 'xu_image')
 xu_label_op = tf.concat([x_label_var] + [u_label_op] * args['K'], axis = 0, name = 'xu_label')
 
-print(args['K'], args['K'] + 1)
-
 # mixmatch
-image_ops, label_ops, image_beta, label_beta = MixMatch(xu_image_op, xu_label_op, xu_image_op, xu_label_op, {
+image_ops, label_ops = MixMatch(xu_image_op, xu_label_op, {
     'mixup_alpha' : args['mixup_alpha'],
     'num_sample' : args['K'] + 1,
 })

@@ -23,25 +23,20 @@ def guess_function(u_split, option):
     
     return sharpen(u_predictions, T)
 
-def MixMatch(x1, p1, x2, p2, option):
+def MixMatch(x1, p1, option):
     n = option['num_sample']
     alpha = option['mixup_alpha']
 
-    n_samples = tf.shape(x1)[0]
-    
-    beta = tf.distributions.Beta(alpha, alpha).sample([n_samples])
+    beta = tf.distributions.Beta(alpha, alpha).sample(1)[0]
     beta = tf.maximum(beta, 1. - beta)
     
     indexs = tf.random_shuffle(tf.range(tf.shape(x1)[0]))
-    x2 = tf.gather(x2, indexs)
-    p2 = tf.gather(p2, indexs)
+    x2 = tf.gather(x1, indexs)
+    p2 = tf.gather(p1, indexs)
     
-    image_beta = tf.reshape(beta, (n_samples, 1, 1, 1))
-    label_beta = tf.reshape(beta, (n_samples, 1))
+    mix_x = beta * x1 + (1 - beta) * x2
+    mix_y = beta * p1 + (1 - beta) * p2
 
-    mix_x = image_beta * x1 + (1 - image_beta) * x2
-    mix_y = label_beta * p1 + (1 - label_beta) * p2
-
-    return tf.split(mix_x, n), tf.split(mix_y, n), image_beta, label_beta
+    return tf.split(mix_x, n), tf.split(mix_y, n)
 
 

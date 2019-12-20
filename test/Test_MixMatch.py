@@ -15,6 +15,8 @@ from utils.Utils import *
 from utils.Teacher_with_MixMatch import *
 from utils.Tensorflow_Utils import *
 
+K = 2
+
 shape = [IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNEL]
 
 x_var = tf.placeholder(tf.float32, [None] + shape, name = 'image/labeled')
@@ -24,7 +26,12 @@ is_training = tf.placeholder(tf.bool)
 model_args = dict(filters = 32)
 
 u_reshape = tf.reshape(tf.transpose(u_var, [1, 0, 2, 3, 4]), [-1] + shape)
-u_sh_predictions = guess_function(tf.split(u_reshape, K), WideResNet, model_args)
+u_sh_predictions = guess_function(tf.split(u_reshape, K), {
+    'classifier' : WideResNet,
+    'model_args' : model_args,
+    'K' : K,
+    'T' : 0.5,
+})
 
 x_label_var = tf.placeholder(tf.float32, [None, CLASSES], name = 'label/labeled')
 u_label_op = tf.stop_gradient(u_sh_predictions, name = 'label/unlabeled')
@@ -32,7 +39,10 @@ u_label_op = tf.stop_gradient(u_sh_predictions, name = 'label/unlabeled')
 xu_image_op = tf.concat([x_var] + tf.split(u_reshape, K), axis = 0, name = 'xu_image')
 xu_label_op = tf.concat([x_label_var] + [u_label_op] * K, axis = 0, name = 'xu_label')
 
-image_ops, label_ops, image_beta_op, label_beta_op = MixMatch(xu_image_op, xu_label_op, xu_image_op, xu_label_op)
+image_ops, label_ops, image_beta_op, label_beta_op = MixMatch(xu_image_op, xu_label_op, xu_image_op, xu_label_op, {
+    'mixup_alpha' : 0.75,
+    'num_sample' : K + 1,
+})
 
 # parse labeled, unlabeled
 x_image_op, u_image_ops = image_ops[0], image_ops[1:]
@@ -72,7 +82,13 @@ labeled_image_data = np.asarray(labeled_image_data, dtype = np.float32)
 unlabeled_image_data = np.asarray(unlabeled_image_data, dtype = np.float32)
 label_data = np.asarray(label_data, dtype = np.float32)
 
-data = sess.run([x_image_op, x_label_op, image_beta_op, label_beta_op], feed_dict = {
+# data = sess.run([x_image_op, x_label_op, image_beta_op, label_beta_op, xu_image_op, xu_label_op], feed_dict = {
+#     x_var : labeled_image_data, 
+#     u_var : unlabeled_image_data, 
+#     x_label_var : label_data,
+#     is_training : False})
+
+data = sess.run([xu_image_op, xu_label_op], feed_dict = {
     x_var : labeled_image_data, 
     u_var : unlabeled_image_data, 
     x_label_var : label_data,
@@ -121,12 +137,14 @@ for image in data[0]:
 #######################################################################################
 # check4. MixMatch
 #######################################################################################
+print(len(data[0]))
+print(len(data[1]))
+
 for image, label in zip(data[0], data[1]):
     image = image.astype(np.uint8)
     image = cv2.resize(image, (112, 112))
 
-    print(label, np.argmax(label))
-    print(data[2][:, 0, 0, 0], data[3][:, 0])
+    print(label, np.argmax(label), CLASS_NAMES[np.argmax(label)])
     cv2.imshow('show', image)
     cv2.waitKey(0)
 

@@ -12,7 +12,7 @@ def pad(x, border = 4):
 
 def RandomPadandCrop(x):
     x = pad(x, 4)
-
+    
     h, w = x.shape[:2]
     new_h, new_w = 32, 32
     
@@ -29,7 +29,7 @@ def RandomFlip(x):
     return x.copy()
 
 def DataAugmentation(x):
-    x = RandomPadandCrop(x)
     x = RandomFlip(x)
+    x = RandomPadandCrop(x)
     return x
 

@@ -51,10 +51,7 @@ log_print('# batch size : {}'.format(BATCH_SIZE), log_txt_path)
 log_print('# max_iteration : {}'.format(MAX_ITERATION), log_txt_path)
 
 # 1. dataset
-if args.labels == 'all':
-    train_data_list, test_data_list = get_dataset_fully_supervised('./dataset/')
-else:
-    train_data_list, _, test_data_list = get_dataset('./dataset/', labels)
+train_data_list, test_data_list = get_dataset_fully_supervised('./dataset/')
 
 log_print('# train dataset : {}'.format(len(train_data_list)), log_txt_path)
 log_print('# test dataset : {}'.format(len(test_data_list)), log_txt_path)
@@ -68,10 +65,10 @@ x_var = tf.placeholder(tf.float32, [BATCH_SIZE] + shape, name = 'image/labeled')
 x_label_var = tf.placeholder(tf.float32, [BATCH_SIZE, CLASSES])
 is_training = tf.placeholder(tf.bool)
 
-model_args = dict(filters = 135)
+model_args = dict(filters = 32)
 
 # get logits
-logits_op = WideResNet(x_var, is_training, **model_args)[0]
+logits_op = WideResNet(x_var, True, **model_args)[0]
 
 # calculate Loss_x, Loss_u
 loss_op = tf.nn.softmax_cross_entropy_with_logits_v2(logits = logits_op, labels = x_label_var)
@@ -83,11 +80,11 @@ train_vars = tf.get_collection('trainable_variables', 'WideResNet')
 ema = tf.train.ExponentialMovingAverage(decay = EMA_DECAY)
 ema_op = ema.apply(train_vars)
 
-predictions_op = WideResNet(x_var, is_training, getter = get_getter(ema), **model_args)[1]
+_, predictions_op = WideResNet(x_var, is_training, getter = get_getter(ema), **model_args)
 
-l2_vars = [var for var in train_vars if 'kernel' in var.name or 'weights' in var.name]
-l2_reg_loss_op = tf.add_n([tf.nn.l2_loss(var) for var in l2_vars]) * WEIGHT_DECAY
-loss_op += l2_reg_loss_op
+# l2_vars = [var for var in train_vars if 'kernel' in var.name or 'weights' in var.name]
+# l2_reg_loss_op = tf.add_n([tf.nn.l2_loss(var) for var in l2_vars]) * WEIGHT_DECAY
+# loss_op += l2_reg_loss_op
 
 correct_op = tf.equal(tf.argmax(predictions_op, axis = -1), tf.argmax(x_label_var, axis = -1))
 accuracy_op = tf.reduce_mean(tf.cast(correct_op, tf.float32)) * 100
@@ -102,7 +99,7 @@ with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
 
 train_summary_dic = {
     'Loss/Total_Loss' : loss_op,
-    'Loss/L2_Regularization_Loss' : l2_reg_loss_op,                                                                                                                                                                                                                                                     
+    # 'Loss/L2_Regularization_Loss' : l2_reg_loss_op,                                                                                                                                                                                                                                                     
     'Accuracy/Train' : accuracy_op,
     'Learning_rate' : learning_rate_var,
 }

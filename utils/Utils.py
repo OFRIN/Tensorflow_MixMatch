@@ -67,7 +67,7 @@ def get_dataset(dataset_dir, n_label):
         image_data = data[b'data'][i]
 
         channel_size = 32 * 32        
-
+        
         r = image_data[:channel_size]
         g = image_data[channel_size : channel_size * 2]
         b = image_data[channel_size * 2 : ]
@@ -93,7 +93,7 @@ def get_dataset(dataset_dir, n_label):
         label = one_hot(class_index, 10)
         for image in images[:n_label_per_class]:
             labeled_data.append([image, label])
-
+        
         for image in images[n_label_per_class:]:
             unlabeled_image_data.append(image)
     

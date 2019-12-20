@@ -18,21 +18,32 @@ from core.WideResNet import *
 from core.Define import *
 
 from utils.Utils import *
-from utils.Teacher_with_MixMatch import *
 from utils.Tensorflow_Utils import *
+from utils.Teacher_with_MixMatch import *
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MixMatch', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--use_gpu', dest='use_gpu', help='use gpu', default='0', type=str)
-    parser.add_argument('--labels', dest='labels', help='labels', default='all', type=str)
+    parser.add_argument('--use_gpu', default='0', type=str)
+    parser.add_argument('--labels', default=250, type=int)
+
+    parser.add_argument('--learning_rate', default=0.002, type=float)
+    parser.add_argument('--ema_decay', default=0.999, type=float)
+    parser.add_argument('--weight_decay', default=0.02, type=float)
+    
+    parser.add_argument('--T', default=0.5, type=float)
+    parser.add_argument('--K', default=2, type=int)
+    parser.add_argument('--mixup_alpha', default=0.75, type=float)
+    parser.add_argument('--lambda_u', default=75, type=float) # general = 100
+
+    parser.add_argument('--rampup_epoch', default=1024, type=int)
+    
     return parser.parse_args()
 
-args = parse_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = args.use_gpu
+args = vars(parse_args())
 
-learning_rate = INIT_LEARNING_RATE
+os.environ["CUDA_VISIBLE_DEVICES"] = args['use_gpu']
 
-model_name = 'MixMatch_cifar@{}'.format(args.labels)
+model_name = 'MixMatch_cifar@{}'.format(args['labels'])
 
 model_dir = './experiments/model/{}/'.format(model_name)
 tensorboard_dir = './experiments/tensorboard/{}'.format(model_name)
@@ -46,17 +57,16 @@ summary_txt_path = model_dir + 'model_summary.txt'
 
 open(log_txt_path, 'w').close()
 
-log_print('# Use GPU : {}'.format(args.use_gpu), log_txt_path)
-log_print('# Labels : {}'.format(args.labels), log_txt_path)
-log_print('# learning rate : {}'.format(learning_rate), log_txt_path)
+log_print('# Use GPU : {}'.format(args['use_gpu']), log_txt_path)
+log_print('# Labels : {}'.format(args['labels']), log_txt_path)
+log_print('# learning rate : {}'.format(args['learning_rate']), log_txt_path)
 log_print('# batch size : {}'.format(BATCH_SIZE), log_txt_path)
 log_print('# max_iteration : {}'.format(MAX_ITERATION), log_txt_path)
 
 # 1. dataset
-labels = int(args.labels)
 
 # 1.1 get labeled, unlabeled dataset
-labeled_data_list, unlabeled_data_list, test_data_list = get_dataset('./dataset/', labels)
+labeled_data_list, unlabeled_data_list, test_data_list = get_dataset('./dataset/', args['labels'])
 
 log_print('# labeled dataset : {}'.format(len(labeled_data_list)), log_txt_path)
 log_print('# unlabeled dataset : {}'.format(len(unlabeled_data_list)), log_txt_path)
@@ -66,25 +76,44 @@ test_iteration = len(test_data_list) // BATCH_SIZE
 # 2. model
 shape = [IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNEL]
 
-x_var = tf.placeholder(tf.float32, [BATCH_SIZE] + shape, name = 'image/labeled')
-u_var = tf.placeholder(tf.float32, [BATCH_SIZE, K] + shape)
-ramp_up_var = tf.placeholder(tf.float32)
-is_training = tf.placeholder(tf.bool)
+x_image_var = tf.placeholder(tf.float32, [BATCH_SIZE] + shape)
+x_label_var = tf.placeholder(tf.float32, [BATCH_SIZE, CLASSES])
 
-model_args = dict(filters = 32)
+u_image_var = tf.placeholder(tf.float32, [BATCH_SIZE, args['K']] + shape)
+
+global_step = tf.placeholder(tf.float32)
+is_training = tf.placeholder(tf.bool)
 
 # base(filters) = 32, 1.5M
 # large(filters) = 135, 26M
-u_reshape = tf.reshape(tf.transpose(u_var, [1, 0, 2, 3, 4]), [-1] + shape)
-u_sh_predictions = guess_function(tf.split(u_reshape, K), WideResNet, model_args)
+model_args = dict(filters = 32)
 
-x_label_var = tf.placeholder(tf.float32, [BATCH_SIZE, CLASSES], name = 'label/labeled')
-u_label_op = tf.stop_gradient(u_sh_predictions, name = 'label/unlabeled')
+# transpose = [16, 2, 32, 32, 3] -> [2, 16, 32, 32, 3]
+# reshape = [2 * 16, 32, 32, 3]
+u_image_ops = tf.reshape(tf.transpose(u_image_var, [1, 0, 2, 3, 4]), [-1] + shape)
+u_image_ops = tf.split(u_image_ops, args['K'])
 
-xu_image_op = tf.concat([x_var] + tf.split(u_reshape, K), axis = 0, name = 'xu_image')
-xu_label_op = tf.concat([x_label_var] + [u_label_op] * K, axis = 0, name = 'xu_label')
+# guess_function
+u_label_op = guess_function(u_image_ops, {
+    'classifier' : WideResNet,
+    'model_args' : model_args,
+    'K' : args['K'],
+    'T' : args['T'],
+})
 
-image_ops, label_ops = MixMatch(xu_image_op, xu_label_op, xu_image_op, xu_label_op)
+u_label_op = tf.stop_gradient(u_label_op)
+
+# concat images and labels.
+xu_image_op = tf.concat([x_image_var] + u_image_ops, axis = 0, name = 'xu_image')
+xu_label_op = tf.concat([x_label_var] + [u_label_op] * args['K'], axis = 0, name = 'xu_label')
+
+print(args['K'], args['K'] + 1)
+
+# mixmatch
+image_ops, label_ops, image_beta, label_beta = MixMatch(xu_image_op, xu_label_op, xu_image_op, xu_label_op, {
+    'mixup_alpha' : args['mixup_alpha'],
+    'num_sample' : args['K'] + 1,
+})
 
 # parse labeled, unlabeled
 x_image_op, u_image_ops = image_ops[0], image_ops[1:]
@@ -98,23 +127,31 @@ mix_u_predictions_ops = tf.concat([WideResNet(u, True, **model_args)[1] for u in
 loss_x_op = tf.nn.softmax_cross_entropy_with_logits_v2(logits = mix_x_logits_op, labels = x_label_op)
 loss_x_op = tf.reduce_mean(loss_x_op)
 
-weight_u_op = LAMBDA_U * tf.clip_by_value(ramp_up_var / RAMP_UP_STEPS, 0.0, 1.0)
+if args['rampup_epoch'] == 0:
+    lambda_u_op = args['lambda_u']
+else:
+    log_print('[i] rampup_epoch : {}'.format(args['rampup_epoch']), log_txt_path)
+    log_print('[i] rampup_iteration : {}'.format(args['rampup_epoch'] * SAVE_ITERATION), log_txt_path)
+    
+    rampup_iteration = args['rampup_epoch'] * SAVE_ITERATION
+    lambda_u_op = args['lambda_u'] * tf.clip_by_value(global_step / rampup_iteration, 0.0, 1.0)
+
 loss_u_op = tf.square(mix_u_predictions_ops - u_label_ops)
-loss_u_op = weight_u_op * tf.reduce_mean(loss_u_op)
+loss_u_op = lambda_u_op * tf.reduce_mean(loss_u_op)
 
 loss_op = loss_x_op + loss_u_op
 
 # with ema
-train_vars = tf.get_collection('trainable_variables', 'WideResNet')
+train_vars = tf.trainable_variables()
 
-ema = tf.train.ExponentialMovingAverage(decay = EMA_DECAY)
+ema = tf.train.ExponentialMovingAverage(decay = args['ema_decay'])
 ema_op = ema.apply(train_vars)
 
-_, predictions_op = WideResNet(x_var, is_training, getter = get_getter(ema), **model_args)
+_, predictions_op = WideResNet(x_image_var, is_training, getter = get_getter(ema), **model_args)
 
-# l2_vars = [var for var in train_vars if 'kernel' in var.name or 'weights' in var.name]
-# l2_reg_loss_op = tf.add_n([tf.nn.l2_loss(var) for var in l2_vars]) * WEIGHT_DECAY
-# loss_op += l2_reg_loss_op
+l2_vars = train_vars # [var for var in train_vars if 'kernel' in var.name or 'weights' in var.name]
+l2_reg_loss_op = tf.add_n([tf.nn.l2_loss(var) for var in l2_vars]) * (args['weight_decay'] * args['learning_rate'])
+loss_op += l2_reg_loss_op
 
 correct_op = tf.equal(tf.argmax(predictions_op, axis = -1), tf.argmax(x_label_var, axis = -1))
 accuracy_op = tf.reduce_mean(tf.cast(correct_op, tf.float32)) * 100
@@ -131,10 +168,12 @@ train_summary_dic = {
     'Loss/Total_Loss' : loss_op,
     'Loss/Labeled_Loss' : loss_x_op,
     'Loss/Unlabeled_Loss' : loss_u_op,
-    # 'Loss/L2_Regularization_Loss' : l2_reg_loss_op,                                                                                                                                                                                                                                                     
+    'Loss/L2_Regularization_Loss' : l2_reg_loss_op,                                                                                                                                                                                                                                                     
+
     'Accuracy/Train' : accuracy_op,
-    'Unlabeled_Weight' : weight_u_op,
-    'Learning_rate' : learning_rate_var,
+
+    'HyperParams/Lambda_U' : lambda_u_op,
+    'HyperParams/Learning_rate' : learning_rate_var,
 }
 
 train_summary_list = []
@@ -162,12 +201,13 @@ main_queue = Queue(100 * NUM_THREADS)
 for i in range(NUM_THREADS):
     log_print('# create thread : {}'.format(i), log_txt_path)
 
-    train_thread = Teacher(labeled_data_list, unlabeled_data_list, BATCH_SIZE, main_queue)
+    train_thread = Teacher(labeled_data_list, unlabeled_data_list, main_queue)
     train_thread.start()
     
     train_threads.append(train_thread)
 
-train_ops = [train_op, weight_u_op, loss_op, loss_x_op, loss_u_op, accuracy_op, train_summary_op]
+learning_rate = args['learning_rate']
+train_ops = [train_op, lambda_u_op, loss_op, loss_x_op, loss_u_op, accuracy_op, train_summary_op]
 
 loss_list = []
 x_loss_list = []
@@ -178,15 +218,19 @@ train_time = time.time()
 for iter in range(1, MAX_ITERATION + 1):
 
     # get batch data with Thread
-    batch_x_image_list, batch_x_label_list, batch_u_image_list = main_queue.get()
-
+    batch_x_image_data, batch_x_label_data, batch_u_image_data = main_queue.get()
+    
+    # print(batch_x_image_data.shape)
+    # print(batch_x_label_data.shape)
+    # print(batch_u_image_data.shape)
+    
     _feed_dict = {
-        x_var : batch_x_image_list, 
-        x_label_var : batch_x_label_list, 
-        u_var : batch_u_image_list,
+        x_image_var : batch_x_image_data, 
+        x_label_var : batch_x_label_data, 
+        u_image_var : batch_u_image_data,
         is_training : True,
         learning_rate_var : learning_rate,
-        ramp_up_var : iter,
+        global_step : iter,
     }
     
     _, weight_u, loss, x_loss, u_loss, accuracy, summary = sess.run(train_ops, feed_dict = _feed_dict)
@@ -227,7 +271,7 @@ for iter in range(1, MAX_ITERATION + 1):
                 batch_label_data[i] = label.astype(np.float32)
             
             _feed_dict = {
-                x_var : batch_image_data,
+                x_image_var : batch_image_data,
                 x_label_var : batch_label_data,
                 is_training : False
             }

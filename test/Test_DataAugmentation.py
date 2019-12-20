@@ -20,16 +20,12 @@ for (image, label) in labeled_data_list:
     class_list[np.argmax(label)] += 1
     print(label, np.argmax(label))
 
-    # aug_image = DataAugmentation(image)
-    pad_x = np.pad(image, [[4, 4], [4, 4], [0, 0]], mode = 'reflect')
-    aug_image = RandomPadandCrop(image).astype(np.uint8)
+    aug_image = DataAugmentation(image)
 
     image = cv2.resize(image, (112, 112))
-    pad_x = cv2.resize(pad_x, (112, 112))
     aug_image = cv2.resize(aug_image, (112, 112))
 
     cv2.imshow('show', image)
-    cv2.imshow('show with pad', pad_x)
     cv2.imshow('show with augment', aug_image)
     cv2.waitKey(0)
 

@@ -30,7 +30,7 @@ def WideResNet(input_var, is_training, scales = int(np.ceil(np.log2(IMAGE_SIZE))
     with tf.variable_scope('WideResNet', reuse = tf.AUTO_REUSE, custom_getter = getter):
         # without normalize
         # x = input_var / 255.
-        x = (x - CIFAR_10_MEAN) / CIFAR_10_STD
+        x = (input_var - CIFAR_10_MEAN) / CIFAR_10_STD
         
         x = tf.layers.conv2d(x, 16, 3, **conv_args(3, 16))
 

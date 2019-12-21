@@ -113,13 +113,24 @@ image_ops, label_ops = MixMatch(xu_image_op, xu_label_op, {
     'num_sample' : args['K'] + 1,
 })
 
+image_ops = interleave(image_ops, BATCH_SIZE)
+
 # parse labeled, unlabeled
 x_image_op, u_image_ops = image_ops[0], image_ops[1:]
 x_label_op, u_label_ops = label_ops[0], tf.concat(label_ops[1:], axis = 0)
 
 # get logits and predictions
-mix_x_logits_op = WideResNet(x_image_op, True, **model_args)[0]
-mix_u_predictions_ops = tf.concat([WideResNet(u, True, **model_args)[1] for u in u_image_ops], axis = 0)
+# mix_x_logits_op = WideResNet(x_image_op, True, **model_args)[0]
+# mix_u_predictions_ops = tf.concat([WideResNet(u, True, **model_args)[1] for u in u_image_ops], axis = 0)
+
+logits_op = [WideResNet(x_image_op, True, **model_args)[0]]
+logits_op += [WideResNet(u, True, **model_args)[0] for u in u_image_ops]
+
+logits_op = interleave(logits_op, BATCH_SIZE)
+
+mix_x_logits_op = logits_op[0]
+mix_u_logits_op = tf.concat(logits_op[1:], axis = 0)
+mix_u_predictions_ops = tf.nn.softmax(mix_u_logits_op, axis = -1)
 
 # calculate Loss_x, Loss_u
 loss_x_op = tf.nn.softmax_cross_entropy_with_logits_v2(logits = mix_x_logits_op, labels = x_label_op)

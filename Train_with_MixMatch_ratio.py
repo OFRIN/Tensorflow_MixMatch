@@ -147,9 +147,9 @@ if args['rampup_epoch'] == 0:
     lambda_u_op = args['lambda_u']
 else:
     log_print('[i] rampup_epoch : {}'.format(args['rampup_epoch']), log_txt_path)
-    log_print('[i] rampup_iteration : {}'.format(args['rampup_epoch'] * SAVE_ITERATION), log_txt_path)
+    log_print('[i] rampup_iteration : {}'.format(args['rampup_epoch'] * 16), log_txt_path)
     
-    rampup_iteration = args['rampup_epoch'] * SAVE_ITERATION
+    rampup_iteration = args['rampup_epoch'] * 16
     lambda_u_op = args['lambda_u'] * tf.clip_by_value(global_step / rampup_iteration, 0.0, 1.0)
 
 loss_u_op = tf.square(mix_u_predictions_ops - u_label_ops)
@@ -213,7 +213,7 @@ train_writer = tf.summary.FileWriter(tensorboard_dir)
 best_valid_accuracy = 0.0
 
 train_threads = []
-main_queue = Queue(100 * NUM_THREADS)
+main_queue = Queue(5 * NUM_THREADS)
 
 for i in range(NUM_THREADS):
     log_print('# create thread : {}'.format(i), log_txt_path)

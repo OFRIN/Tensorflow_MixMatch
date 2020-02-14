@@ -189,8 +189,8 @@ train_summary_dic = {
 
     'Accuracy/Train' : accuracy_op,
 
-    'HyperParams/Lambda_U' : lambda_u_op,
-    'HyperParams/Learning_rate' : learning_rate_var,
+    'Monitors/Lambda_U' : lambda_u_op,
+    'Monitors/Learning_rate' : learning_rate_var,
 }
 
 train_summary_list = []

@@ -1,5 +1,5 @@
-# Copyright (C) 2019 * Ltd. All rights reserved.
-# author : SangHyeon Jo <josanghyeokn@gmail.com>
+# Copyright (C) 2020 * Ltd. All rights reserved.
+# author : Sanghyeon Jo <josanghyeokn@gmail.com>
 
 import os
 import cv2
@@ -34,12 +34,12 @@ def parse_args():
     parser.add_argument('--K', default=2, type=int)
     parser.add_argument('--mixup_alpha', default=0.75, type=float)
     parser.add_argument('--lambda_u', default=75, type=float) # general = 100
-
+    
     parser.add_argument('--rampup_epoch', default=1024, type=int)
     
-    return parser.parse_args()
+    return vars(parser.parse_args())
 
-args = vars(parse_args())
+args = parse_args()
 
 os.environ["CUDA_VISIBLE_DEVICES"] = args['use_gpu']
 

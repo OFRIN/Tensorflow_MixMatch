@@ -24,7 +24,7 @@ def parse_args():
     
     parser.add_argument('--use_gpu', default='0', type=str)
     parser.add_argument('--seed', default=0, type=int)
-
+    
     parser.add_argument('--num_labels', default=250, type=int)
     parser.add_argument('--num_validation', default=5000, type=int)
 

@@ -23,7 +23,7 @@ class Teacher_for_labeled_dataset:
             num_parallel_calls = tf.data.experimental.AUTOTUNE
         )
         dataset = dataset.shuffle(1024)
-
+        
         dataset = dataset.apply(
             tf.data.experimental.map_and_batch(
                 self.parser,
@@ -32,7 +32,7 @@ class Teacher_for_labeled_dataset:
                 drop_remainder = option['is_training'],
             )
         )
-
+        
         if option['use_prefetch']:
             dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
@@ -55,7 +55,8 @@ class Teacher_for_labeled_dataset:
         label = tf.decode_raw(parsed['label_raw'], tf.float32)
         label = tf.reshape(label, [10])
         
-        [image] = tf.py_func(self.augment_func, [image], [tf.float32])
+        if self.augment_func is not None:
+            [image] = tf.py_func(self.augment_func, [image], [tf.float32])
 
         return image, label
 

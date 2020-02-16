@@ -23,7 +23,7 @@ def RandomFlip(x):
         x = x[:, ::-1, :]
     return x.copy()
 
-def DataAugmentation(x):
+def WeaklyAugment(x):
     x = RandomFlip(x)
     x = RandomPadandCrop(x)
     return x

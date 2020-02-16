@@ -1,30 +1,30 @@
 # Copyright (C) 2020 * Ltd. All rights reserved.
 # author : Sanghyeon Jo <josanghyeokn@gmail.com>
 
-import os
 import cv2
-import sys
-import time
-import random
+import json
 import argparse
 
 import numpy as np
 import tensorflow as tf
 
-from queue import Queue
-
 from core.MixMatch import *
 from core.WideResNet import *
-from core.Define import *
+
+from core.WeaklyAugment import *
 
 from utils.Utils import *
+from utils.Teacher import *
 from utils.Tensorflow_Utils import *
-from utils.Teacher_with_MixMatch import *
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MixMatch', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
     parser.add_argument('--use_gpu', default='0', type=str)
-    parser.add_argument('--labels', default=250, type=int)
+    parser.add_argument('--seed', default=0, type=int)
+
+    parser.add_argument('--num_labels', default=250, type=int)
+    parser.add_argument('--batch_size', default=64, type=int)
 
     parser.add_argument('--learning_rate', default=0.002, type=float)
     parser.add_argument('--ema_decay', default=0.999, type=float)
@@ -32,10 +32,11 @@ def parse_args():
     
     parser.add_argument('--T', default=0.5, type=float)
     parser.add_argument('--K', default=2, type=int)
-    parser.add_argument('--mixup_alpha', default=0.75, type=float)
+    parser.add_argument('--alpha', default=0.75, type=float)
     parser.add_argument('--lambda_u', default=75, type=float) # general = 100
     
-    parser.add_argument('--rampup_epoch', default=1024, type=int)
+    parser.add_argument('--rampup_iteration', default=1024, type=int)
+    parser.add_argument('--train_iteration', default=1024 * 1024, type=int)
     
     return vars(parser.parse_args())
 
@@ -43,7 +44,7 @@ args = parse_args()
 
 os.environ["CUDA_VISIBLE_DEVICES"] = args['use_gpu']
 
-model_name = 'MixMatch_cifar@{}'.format(args['labels'])
+model_name = 'MixMatch_cifar@{}_seed@{}'.format(args['labels'], args['seed'])
 
 model_dir = './experiments/model/{}/'.format(model_name)
 tensorboard_dir = './experiments/tensorboard/{}'.format(model_name)
@@ -52,34 +53,73 @@ if not os.path.isdir(model_dir):
     os.makedirs(model_dir)
 
 ckpt_format = model_dir + '{}.ckpt'
+
 log_txt_path = model_dir + 'log.txt'
 summary_txt_path = model_dir + 'model_summary.txt'
 
 open(log_txt_path, 'w').close()
 
-log_print('# Use GPU : {}'.format(args['use_gpu']), log_txt_path)
-log_print('# Labels : {}'.format(args['labels']), log_txt_path)
-log_print('# learning rate : {}'.format(args['learning_rate']), log_txt_path)
-log_print('# batch size : {}'.format(BATCH_SIZE), log_txt_path)
-log_print('# max_iteration : {}'.format(MAX_ITERATION), log_txt_path)
-
 # 1. dataset
+log_print('# {}'.format(model_name), log_txt_path)
+log_print('{}'.format(json.dumps(args, indent='\t')), log_txt_path)
 
-# 1.1 get labeled, unlabeled dataset
-labeled_data_list, unlabeled_data_list, test_data_list = get_dataset('./dataset/', args['labels'])
+# 1.1 get labeled dataset, unlabeled dataset, validation dataset and test_dataset.
+train_labeled_dataset = Teacher_for_labeled_dataset(
+    {
+        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_labeled_*.tfrecord'.format(args['num_labels'], args['seed']),
+        
+        'is_training' : True,
+        'use_prefetch' : False,
 
-log_print('# labeled dataset : {}'.format(len(labeled_data_list)), log_txt_path)
-log_print('# unlabeled dataset : {}'.format(len(unlabeled_data_list)), log_txt_path)
+        'batch_size' : args['batch_size'],
+        'augment_func' : WeaklyAugment,
+    }
+)
 
-test_iteration = len(test_data_list) // BATCH_SIZE
+train_unlabeled_dataset = Teacher_for_unlabeled_dataset(
+    {
+        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_unlabeled_*.tfrecord'.format(args['num_labels'], args['seed']),
+        
+        'is_training' : True,
+        'use_prefetch' : False,
+
+        'K ' : args['K'],
+        'batch_size' : args['batch_size'],
+        'augment_func' : WeaklyAugment,
+    }
+)
+
+valid_dataset = Teacher_for_labeled_dataset(
+    {
+        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_validation_*.tfrecord'.format(args['num_labels'], args['seed']),
+        
+        'is_training' : False,
+        'use_prefetch' : False,
+
+        'batch_size' : args['batch_size'],
+        'augment_func' : None,
+    }
+)
+
+test_dataset = Teacher_for_labeled_dataset(
+    {
+        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_test_*.tfrecord'.format(args['num_labels'], args['seed']),
+        
+        'is_training' : False,
+        'use_prefetch' : False,
+
+        'batch_size' : args['batch_size'],
+        'augment_func' : None,
+    }
+)
 
 # 2. model
-shape = [IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNEL]
+shape = [32, 32, 3]
 
-x_image_var = tf.placeholder(tf.float32, [BATCH_SIZE] + shape)
-x_label_var = tf.placeholder(tf.float32, [BATCH_SIZE, CLASSES])
+x_image_var = tf.placeholder(tf.float32, [None] + shape)
+x_label_var = tf.placeholder(tf.float32, [None, 10])
 
-u_image_var = tf.placeholder(tf.float32, [BATCH_SIZE, args['K']] + shape)
+u_image_var = tf.placeholder(tf.float32, [None, args['K']] + shape)
 
 global_step = tf.placeholder(tf.float32)
 is_training = tf.placeholder(tf.bool)
@@ -109,53 +149,39 @@ xu_label_op = tf.concat([x_label_var] + [u_label_op] * args['K'], axis = 0, name
 
 # mixmatch
 image_ops, label_ops = MixMatch(xu_image_op, xu_label_op, {
-    'mixup_alpha' : args['mixup_alpha'],
-    'num_sample' : args['K'] + 1,
+    'K' : args['K'],
+    'alpha' : args['alpha'],
 })
 
-image_ops = interleave(image_ops, BATCH_SIZE)
+# interleave 
+image_ops = interleave(image_ops, args['batch_size'])
 
 # parse labeled, unlabeled
 x_image_op, u_image_ops = image_ops[0], image_ops[1:]
-x_label_op, u_label_ops = label_ops[0], tf.concat(label_ops[1:], axis = 0)
+x_label_op, u_label_op = label_ops[0], tf.concat(label_ops[1:], axis = 0)
 
-# get logits and predictions
-# mix_x_logits_op = WideResNet(x_image_op, True, **model_args)[0]
-# mix_u_predictions_ops = tf.concat([WideResNet(u, True, **model_args)[1] for u in u_image_ops], axis = 0)
-
-before_bn_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+prior_bn_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 logits_op = [WideResNet(x_image_op, True, **model_args)[0]]
-after_bn_ops = [var for var in tf.get_collection(tf.GraphKeys.UPDATE_OPS) if var not in before_bn_ops]
-
-# for var in after_bn_ops:
-#     print(var.name)
-# input()
+train_bn_ops = [var for var in tf.get_collection(tf.GraphKeys.UPDATE_OPS) if var not in prior_bn_ops]
 
 logits_op += [WideResNet(u, True, **model_args)[0] for u in u_image_ops]
 
-logits_op = interleave(logits_op, BATCH_SIZE)
+# interleave 
+logits_op = interleave(logits_op, args['batch_size'])
 
 mix_x_logits_op = logits_op[0]
+
 mix_u_logits_op = tf.concat(logits_op[1:], axis = 0)
-mix_u_predictions_ops = tf.nn.softmax(mix_u_logits_op, axis = -1)
+mix_u_predictions_op = tf.nn.softmax(mix_u_logits_op)
 
 # calculate Loss_x, Loss_u
 loss_x_op = tf.nn.softmax_cross_entropy_with_logits_v2(logits = mix_x_logits_op, labels = x_label_op)
 loss_x_op = tf.reduce_mean(loss_x_op)
 
-if args['rampup_epoch'] == 0:
-    lambda_u_op = args['lambda_u']
-else:
-    log_print('[i] rampup_epoch : {}'.format(args['rampup_epoch']), log_txt_path)
-    log_print('[i] rampup_iteration : {}'.format(args['rampup_epoch'] * SAVE_ITERATION), log_txt_path)
-    
-    rampup_iteration = args['rampup_epoch'] * SAVE_ITERATION
-    lambda_u_op = args['lambda_u'] * tf.clip_by_value(global_step / rampup_iteration, 0.0, 1.0)
+lambda_u_op = args['lambda_u'] * tf.clip_by_value(global_step / args['rampup_iteration'], 0.0, 1.0)
 
-loss_u_op = tf.square(mix_u_predictions_ops - u_label_ops)
+loss_u_op = tf.square(mix_u_predictions_op - u_label_op)
 loss_u_op = lambda_u_op * tf.reduce_mean(loss_u_op)
-
-loss_op = loss_x_op + loss_u_op
 
 # with ema
 train_vars = tf.trainable_variables()
@@ -167,7 +193,8 @@ _, predictions_op = WideResNet(x_image_var, False, getter = get_getter(ema), **m
 
 l2_vars = [var for var in train_vars if 'kernel' in var.name or 'weights' in var.name]
 l2_reg_loss_op = tf.add_n([tf.nn.l2_loss(var) for var in l2_vars]) * (args['weight_decay'] * args['learning_rate'])
-loss_op += l2_reg_loss_op
+
+loss_op = loss_x_op + loss_u_op + l2_reg_loss_op
 
 correct_op = tf.equal(tf.argmax(predictions_op, axis = -1), tf.argmax(x_label_var, axis = -1))
 accuracy_op = tf.reduce_mean(tf.cast(correct_op, tf.float32)) * 100
@@ -176,44 +203,47 @@ model_summary(train_vars, summary_txt_path)
 
 # 3. optimizer & tensorboard
 learning_rate_var = tf.placeholder(tf.float32)
-# with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
-with tf.control_dependencies(after_bn_ops):
+with tf.control_dependencies(train_bn_ops):
     train_op = tf.train.AdamOptimizer(learning_rate_var).minimize(loss_op, colocate_gradients_with_ops = True)
     train_op = tf.group(train_op, ema_op)
 
 train_summary_dic = {
     'Loss/Total_Loss' : loss_op,
+
     'Loss/Labeled_Loss' : loss_x_op,
     'Loss/Unlabeled_Loss' : loss_u_op,
     'Loss/L2_Regularization_Loss' : l2_reg_loss_op,                                                                                                                                                                                                                                                     
-
-    'Accuracy/Train' : accuracy_op,
-
+    
     'Monitors/Lambda_U' : lambda_u_op,
     'Monitors/Learning_rate' : learning_rate_var,
+
+    'Accuracy/Train' : accuracy_op,
 }
+train_summary_op = tf.summary.merge([tf.summary.scalar(name, train_summary_dic[name]) for name in train_summary_dic.keys()])
 
-train_summary_list = []
-for name in train_summary_dic.keys():
-    value = train_summary_dic[name]
-    train_summary_list.append(tf.summary.scalar(name, value))
-train_summary_op = tf.summary.merge(train_summary_list)
+valid_summary_dic = {
+    'Accuracy/Validation' : tf.placeholder(tf.float32),
+}
+valid_summary_op = tf.summary.merge([tf.summary.scalar(name, valid_summary_dic[name]) for name in valid_summary_dic.keys()])
 
-valid_accuracy_var = tf.placeholder(tf.float32)
-valid_accuracy_op = tf.summary.scalar('Accuracy/Validation', valid_accuracy_var)
+test_summary_dic = {
+    'Accuracy/Test' : tf.placeholder(tf.float32),
+}
+test_summary_op = tf.summary.merge([tf.summary.scalar(name, test_summary_dic[name]) for name in test_summary_dic.keys()])
 
-# 4. train loop
+train_writer = tf.summary.FileWriter(tensorboard_dir)
+
+# 4. session & saver
 sess = tf.Session()
 sess.run(tf.global_variables_initializer())
 
-saver = tf.train.Saver()
-train_writer = tf.summary.FileWriter(tensorboard_dir)
+saver = tf.train.Saver(max_to_keep = 2)
 
-# 5. thread
-best_valid_accuracy = 0.0
+# 5. train
+best_valid_path
 
 train_threads = []
-main_queue = Queue(100 * NUM_THREADS)
+main_queue = Queue(20 * NUM_THREADS)
 
 for i in range(NUM_THREADS):
     log_print('# create thread : {}'.format(i), log_txt_path)

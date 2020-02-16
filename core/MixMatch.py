@@ -24,9 +24,9 @@ def guess_function(u_split, option):
     return sharpen(u_predictions, T)
 
 def MixMatch(x1, p1, option):
-    n = option['num_sample']
-    alpha = option['mixup_alpha']
-
+    n = option['K'] + 1
+    alpha = option['alpha']
+    
     beta = tf.distributions.Beta(alpha, alpha).sample(1)[0]
     beta = tf.maximum(beta, 1. - beta)
     
@@ -39,7 +39,6 @@ def MixMatch(x1, p1, option):
 
     return tf.split(mix_x, n), tf.split(mix_y, n)
 
-## refer : other github 
 def interleave_offsets(batch, nu):
     groups = [batch // (nu + 1)] * (nu + 1)
     for x in range(batch - sum(groups)):
@@ -50,7 +49,6 @@ def interleave_offsets(batch, nu):
     assert offsets[-1] == batch
     return offsets
     
-## refer : other github 
 def interleave(xy, batch):
     nu = len(xy) - 1
     offsets = interleave_offsets(batch, nu)

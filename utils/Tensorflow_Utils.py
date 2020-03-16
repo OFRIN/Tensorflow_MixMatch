@@ -8,8 +8,18 @@ def get_getter(ema):
     def ema_getter(getter, name, *args, **kwargs):
         var = getter(name, *args, **kwargs)
         ema_var = ema.average(var)
+        
+        if ema_var is not None:
+            return ema_var
+        else:
+            return var
+
         return ema_var if ema_var else var
+
     return ema_getter
+
+def get_model_vars(scope = None):
+    return tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
 
 def load_graph(frozen_graph_filename):
     with tf.gfile.GFile(frozen_graph_filename, "rb") as f:

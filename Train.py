@@ -1,343 +1,373 @@
 # Copyright (C) 2020 * Ltd. All rights reserved.
 # author : Sanghyeon Jo <josanghyeokn@gmail.com>
 
+import os
 import cv2
+import sys
+import time
 import json
-import argparse
+import random
 
 import numpy as np
 import tensorflow as tf
 
+from core.Config import *
 from core.MixMatch import *
 from core.WideResNet import *
 
-from core.WeaklyAugment import *
-
 from utils.Utils import *
-from utils.Teacher import *
+from utils.Dataflow import *
+from utils.Generator import *
 from utils.Tensorflow_Utils import *
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='MixMatch', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+from utils.CIFAR10 import *
 
-    parser.add_argument('--use_gpu', default='0', type=str)
-    parser.add_argument('--seed', default=0, type=int)
+if __name__ == '__main__':
+    #######################################################################################
+    # 1. Config
+    #######################################################################################
+    flags = get_config()
 
-    parser.add_argument('--num_labels', default=250, type=int)
-    parser.add_argument('--batch_size', default=64, type=int)
+    np.random.seed(flags.seed)
 
-    parser.add_argument('--learning_rate', default=0.002, type=float)
-    parser.add_argument('--ema_decay', default=0.999, type=float)
-    parser.add_argument('--weight_decay', default=0.02, type=float)
+    num_gpu = len(flags.use_gpu.split(','))
+    os.environ["CUDA_VISIBLE_DEVICES"] = flags.use_gpu
     
-    parser.add_argument('--T', default=0.5, type=float)
-    parser.add_argument('--K', default=2, type=int)
-    parser.add_argument('--alpha', default=0.75, type=float)
-    parser.add_argument('--lambda_u', default=75, type=float) # general = 100
+    flags.max_iteration = flags.max_epochs * flags.valid_iteration
+    flags.rampup_iteration = flags.rampup_length * flags.valid_iteration
+
+    flags.batch_size = flags.batch_size_per_gpu * num_gpu
+
+    model_name = 'MixMatch_cifar@{}'.format(flags.labels)
+    model_dir = './experiments/model/{}/'.format(model_name)
+    tensorboard_dir = './experiments/tensorboard/{}'.format(model_name)
+
+    ckpt_format = model_dir + '{}.ckpt'
+    log_txt_path = model_dir + 'log.txt'
+
+    if not os.path.isdir(model_dir):
+        os.makedirs(model_dir)
+
+    if os.path.isfile(log_txt_path):
+        open(log_txt_path, 'w').close()
+
+    #######################################################################################
+    # 2. Dataset
+    #######################################################################################
+    labeled_dataset, unlabeled_dataset, valid_dataset, test_dataset = get_dataset_cifar10(flags.labels)
+
+    log_print('# labeled dataset : {}'.format(len(labeled_dataset)), log_txt_path)
+    log_print('# unlabeled dataset : {}'.format(len(unlabeled_dataset)), log_txt_path)
+    log_print('# valid dataset : {}'.format(len(valid_dataset)), log_txt_path)
+    log_print('# test dataset : {}'.format(len(test_dataset)), log_txt_path)
+
+    #######################################################################################
+    # 3. Generator & Queue
+    #######################################################################################
+    augmentors = []
+    augment_func = None
+
+    if flags.augment == 'weakly_augment':
+        number_of_cores = 1
+
+        augment_func = Weakly_Augment_func
+        augmentors.append(Weakly_Augment())
+
+    elif flags.augment == 'randaugment':
+        number_of_cores = mp.cpu_count()
+
+        # for randaugment
+
+    labeled_dataflow_option = {
+        'augmentors' : augmentors,
+
+        'shuffle' : True,
+        'remainder' : False,
     
-    parser.add_argument('--rampup_iteration', default=1024, type=int)
-    parser.add_argument('--train_iteration', default=1024 * 1024, type=int)
-    
-    return vars(parser.parse_args())
+        'batch_size' : flags.batch_size,
 
-args = parse_args()
+        'num_prefetch_for_dataset' : 2,
+        'num_prefetch_for_batch' : 2,
 
-os.environ["CUDA_VISIBLE_DEVICES"] = args['use_gpu']
-
-model_name = 'MixMatch_cifar@{}_seed@{}'.format(args['labels'], args['seed'])
-
-model_dir = './experiments/model/{}/'.format(model_name)
-tensorboard_dir = './experiments/tensorboard/{}'.format(model_name)
-
-if not os.path.isdir(model_dir):
-    os.makedirs(model_dir)
-
-ckpt_format = model_dir + '{}.ckpt'
-
-log_txt_path = model_dir + 'log.txt'
-summary_txt_path = model_dir + 'model_summary.txt'
-
-open(log_txt_path, 'w').close()
-
-# 1. dataset
-log_print('# {}'.format(model_name), log_txt_path)
-log_print('{}'.format(json.dumps(args, indent='\t')), log_txt_path)
-
-# 1.1 get labeled dataset, unlabeled dataset, validation dataset and test_dataset.
-train_labeled_dataset = Teacher_for_labeled_dataset(
-    {
-        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_labeled_*.tfrecord'.format(args['num_labels'], args['seed']),
-        
-        'is_training' : True,
-        'use_prefetch' : False,
-
-        'batch_size' : args['batch_size'],
-        'augment_func' : WeaklyAugment,
+        'number_of_cores' : number_of_cores,
     }
-)
 
-train_unlabeled_dataset = Teacher_for_unlabeled_dataset(
-    {
-        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_unlabeled_*.tfrecord'.format(args['num_labels'], args['seed']),
+    unlabeled_dataflow_option = {
+        'shuffle' : True,
+        'remainder' : False,
+
+        'K' : flags.K,
+        'batch_size' : flags.batch_size,
         
-        'is_training' : True,
-        'use_prefetch' : False,
+        'num_prefetch_for_dataset' : 2,
+        'num_prefetch_for_batch' : 2,
 
-        'K ' : args['K'],
-        'batch_size' : args['batch_size'],
-        'augment_func' : WeaklyAugment,
+        'number_of_cores' : number_of_cores,
+        'augment_func' : augment_func,
     }
-)
 
-valid_dataset = Teacher_for_labeled_dataset(
-    {
-        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_validation_*.tfrecord'.format(args['num_labels'], args['seed']),
+    # for CIFAR-10
+    shape = [32, 32, 3]
+    classes = 10
+
+    x_image_var = tf.placeholder(tf.float32, [flags.batch_size] + shape, name = 'images')
+    x_label_var = tf.placeholder(tf.float32, [flags.batch_size, classes], name = 'labels')
+
+    u_image_var = tf.placeholder(tf.float32, [flags.batch_size, flags.K] + shape, name = 'unlabeled_images')
+
+    global_step = tf.placeholder(tf.float32, name = 'step')
+    
+    labeled_generator_func = lambda ds: Generator({
+        'dataset' : ds, 
+        'placeholders' : [x_image_var, x_label_var], 
+        'queue_size' : 5, 
+        'batch_size' : flags.batch_size // num_gpu,
+    })
+
+    unlabeled_generator_func = lambda ds: Generator({
+        'dataset' : ds, 
+        'placeholders' : [u_image_var], 
+        'queue_size' : 5, 
+        'batch_size' : flags.batch_size // num_gpu,
+    })
+
+    labeled_dataflow_list = [generate_labeled_dataflow(labeled_dataset, labeled_dataflow_option) for _ in range(num_gpu)]
+    unlabeled_dataflow_list = [generate_unlabeled_dataflow(unlabeled_dataset, unlabeled_dataflow_option) for _ in range(num_gpu)]
+
+    labeled_generators = [labeled_generator_func(labeled_dataflow_list[i]) for i in range(num_gpu)]
+    unlabeled_generators = [unlabeled_generator_func(unlabeled_dataflow_list[i]) for i in range(num_gpu)]
+
+    log_print('[i] generate dataset and generators', log_txt_path)
+
+    #######################################################################################
+    # 4. Model
+    #######################################################################################
+    # base(filters) = 32, 1.5M
+    # large(filters) = 135, 26M
+    model_args = dict(
+        filters = 32,
+        scales = int(np.ceil(np.log2(shape[0]))) - 2,
+        repeat = 4,
+        getter = None,
+    )
+
+    image_op, label_op = labeled_generators[0].dequeue()
+    unlabeled_image_op = unlabeled_generators[0].dequeue()
+
+    mixmatch = MixMatch({
+        'classifier_func' : lambda x: WideResNet(x, True, model_args),
         
-        'is_training' : False,
-        'use_prefetch' : False,
+        'K' : flags.K,
+        'T' : flags.T,
+        
+        'alpha' : flags.alpha,
+        'batch_size' : flags.batch_size,
 
-        'batch_size' : args['batch_size'],
-        'augment_func' : None,
+        'classes' : classes,
+        'shape' : shape,
+    })
+    
+    x_logits_op, x_label_op, u_predictions_op, u_label_op, train_bn_ops = mixmatch(image_op, label_op, unlabeled_image_op)
+
+    # calculate loss about labeled dataset and unlabeled dataset
+    loss_x_op = tf.nn.softmax_cross_entropy_with_logits_v2(logits = x_logits_op, labels = x_label_op)
+    loss_x_op = tf.reduce_mean(loss_x_op)
+
+    lambda_u_op = flags.lambda_u
+    if flags.rampup_length > 0:
+        lambda_u_op *= tf.clip_by_value(global_step / flags.rampup_iteration, 0.0, 1.0)
+    
+    loss_u_op = tf.square(u_predictions_op - u_label_op)
+    loss_u_op = lambda_u_op * tf.reduce_mean(loss_u_op)
+
+    flags.weight_decay *= flags.learning_rate
+    l2_reg_loss_op = flags.weight_decay * tf.add_n([tf.nn.l2_loss(var) for var in [var for var in get_model_vars('WideResNet')]])
+
+    loss_op = loss_x_op + loss_u_op + l2_reg_loss_op
+
+    # set exponential moving average
+    ema = tf.train.ExponentialMovingAverage(decay = flags.ema_decay)
+    ema_op = ema.apply(get_model_vars())
+    
+    model_args['getter'] = get_getter(ema)
+    predictions_op = WideResNet(image_op, False, model_args)['predictions']
+
+    #######################################################################################
+    # 4. Metrics
+    #######################################################################################
+    # calculate accuracy about labeled dataset
+    correct_op = tf.equal(tf.argmax(predictions_op, axis = -1), tf.argmax(label_op, axis = -1))
+    accuracy_op = tf.reduce_mean(tf.cast(correct_op, tf.float32)) * 100
+
+    #######################################################################################
+    # 5. Optimizer
+    #######################################################################################
+    learning_rate_var = tf.placeholder(tf.float32)
+    with tf.control_dependencies(train_bn_ops):
+        train_op = tf.train.AdamOptimizer(learning_rate_var).minimize(loss_op, colocate_gradients_with_ops = True)
+        train_op = tf.group(train_op, ema_op)
+
+    # for testing
+    test_image_var = tf.placeholder(tf.float32, [flags.batch_size] + shape, name = 'images')
+    test_label_var = tf.placeholder(tf.float32, [flags.batch_size, classes], name = 'labels')
+
+    test_predictions_op = WideResNet(test_image_var, False, model_args)['predictions']
+
+    # calculate accuracy about labeled dataset
+    test_correct_op = tf.equal(tf.argmax(test_predictions_op, axis = -1), tf.argmax(test_label_var, axis = -1))
+    test_accuracy_op = tf.reduce_mean(tf.cast(test_correct_op, tf.float32)) * 100
+
+    #######################################################################################
+    # 6. Tensorboard
+    #######################################################################################
+    train_summary_dic = {
+        'Loss/Total_Loss' : loss_op,
+        'Loss/Labeled_Loss' : loss_x_op,
+        'Loss/Unlabeled_Loss' : loss_u_op,
+        'Loss/L2_Regularization_Loss' : l2_reg_loss_op,                                                                                                                                                                                                                                                     
+
+        'Accuracy/Train' : accuracy_op,
+
+        'Params/Lambda_U' : lambda_u_op,
+        'Params/Learning_rate' : learning_rate_var,
     }
-)
+    train_summary_op = tf.summary.merge([tf.summary.scalar(name, train_summary_dic[name]) for name in train_summary_dic.keys()])
 
-test_dataset = Teacher_for_labeled_dataset(
-    {
-        'tfrecord_format' : './dataset/SSL/cifar@{}_seed@{}_test_*.tfrecord'.format(args['num_labels'], args['seed']),
-        
-        'is_training' : False,
-        'use_prefetch' : False,
-
-        'batch_size' : args['batch_size'],
-        'augment_func' : None,
-    }
-)
-
-# 2. model
-shape = [32, 32, 3]
-
-x_image_var = tf.placeholder(tf.float32, [None] + shape)
-x_label_var = tf.placeholder(tf.float32, [None, 10])
-
-u_image_var = tf.placeholder(tf.float32, [None, args['K']] + shape)
-
-global_step = tf.placeholder(tf.float32)
-is_training = tf.placeholder(tf.bool)
-
-# base(filters) = 32, 1.5M
-# large(filters) = 135, 26M
-model_args = dict(filters = 32)
-
-# transpose = [16, 2, 32, 32, 3] -> [2, 16, 32, 32, 3]
-# reshape = [2 * 16, 32, 32, 3]
-u_image_ops = tf.reshape(tf.transpose(u_image_var, [1, 0, 2, 3, 4]), [-1] + shape)
-u_image_ops = tf.split(u_image_ops, args['K'])
-
-# guess_function
-u_label_op = guess_function(u_image_ops, {
-    'classifier' : WideResNet,
-    'model_args' : model_args,
-    'K' : args['K'],
-    'T' : args['T'],
-})
-
-u_label_op = tf.stop_gradient(u_label_op)
-
-# concat images and labels.
-xu_image_op = tf.concat([x_image_var] + u_image_ops, axis = 0, name = 'xu_image')
-xu_label_op = tf.concat([x_label_var] + [u_label_op] * args['K'], axis = 0, name = 'xu_label')
-
-# mixmatch
-image_ops, label_ops = MixMatch(xu_image_op, xu_label_op, {
-    'K' : args['K'],
-    'alpha' : args['alpha'],
-})
-
-# interleave 
-image_ops = interleave(image_ops, args['batch_size'])
-
-# parse labeled, unlabeled
-x_image_op, u_image_ops = image_ops[0], image_ops[1:]
-x_label_op, u_label_op = label_ops[0], tf.concat(label_ops[1:], axis = 0)
-
-prior_bn_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-logits_op = [WideResNet(x_image_op, True, **model_args)[0]]
-train_bn_ops = [var for var in tf.get_collection(tf.GraphKeys.UPDATE_OPS) if var not in prior_bn_ops]
-
-logits_op += [WideResNet(u, True, **model_args)[0] for u in u_image_ops]
-
-# interleave 
-logits_op = interleave(logits_op, args['batch_size'])
-
-mix_x_logits_op = logits_op[0]
-
-mix_u_logits_op = tf.concat(logits_op[1:], axis = 0)
-mix_u_predictions_op = tf.nn.softmax(mix_u_logits_op)
-
-# calculate Loss_x, Loss_u
-loss_x_op = tf.nn.softmax_cross_entropy_with_logits_v2(logits = mix_x_logits_op, labels = x_label_op)
-loss_x_op = tf.reduce_mean(loss_x_op)
-
-lambda_u_op = args['lambda_u'] * tf.clip_by_value(global_step / args['rampup_iteration'], 0.0, 1.0)
-
-loss_u_op = tf.square(mix_u_predictions_op - u_label_op)
-loss_u_op = lambda_u_op * tf.reduce_mean(loss_u_op)
-
-# with ema
-train_vars = tf.trainable_variables()
-
-ema = tf.train.ExponentialMovingAverage(decay = args['ema_decay'])
-ema_op = ema.apply(train_vars)
-
-_, predictions_op = WideResNet(x_image_var, False, getter = get_getter(ema), **model_args)
-
-l2_vars = [var for var in train_vars if 'kernel' in var.name or 'weights' in var.name]
-l2_reg_loss_op = tf.add_n([tf.nn.l2_loss(var) for var in l2_vars]) * (args['weight_decay'] * args['learning_rate'])
-
-loss_op = loss_x_op + loss_u_op + l2_reg_loss_op
-
-correct_op = tf.equal(tf.argmax(predictions_op, axis = -1), tf.argmax(x_label_var, axis = -1))
-accuracy_op = tf.reduce_mean(tf.cast(correct_op, tf.float32)) * 100
-
-model_summary(train_vars, summary_txt_path)
-
-# 3. optimizer & tensorboard
-learning_rate_var = tf.placeholder(tf.float32)
-with tf.control_dependencies(train_bn_ops):
-    train_op = tf.train.AdamOptimizer(learning_rate_var).minimize(loss_op, colocate_gradients_with_ops = True)
-    train_op = tf.group(train_op, ema_op)
-
-train_summary_dic = {
-    'Loss/Total_Loss' : loss_op,
-
-    'Loss/Labeled_Loss' : loss_x_op,
-    'Loss/Unlabeled_Loss' : loss_u_op,
-    'Loss/L2_Regularization_Loss' : l2_reg_loss_op,                                                                                                                                                                                                                                                     
+    valid_accuracy_var = tf.placeholder(tf.float32)
+    valid_accuracy_op = tf.summary.scalar('Accuracy/Validation', valid_accuracy_var)
     
-    'Monitors/Lambda_U' : lambda_u_op,
-    'Monitors/Learning_rate' : learning_rate_var,
+    train_writer = tf.summary.FileWriter(tensorboard_dir)
 
-    'Accuracy/Train' : accuracy_op,
-}
-train_summary_op = tf.summary.merge([tf.summary.scalar(name, train_summary_dic[name]) for name in train_summary_dic.keys()])
+    log_print('{}'.format(json.dumps(flags_to_dict(flags), indent='\t')), log_txt_path)
 
-valid_summary_dic = {
-    'Accuracy/Validation' : tf.placeholder(tf.float32),
-}
-valid_summary_op = tf.summary.merge([tf.summary.scalar(name, valid_summary_dic[name]) for name in valid_summary_dic.keys()])
+    #######################################################################################
+    # 7. create Session and Saver
+    #######################################################################################
+    sess = tf.Session()
+    coord = tf.train.Coordinator()
 
-test_summary_dic = {
-    'Accuracy/Test' : tf.placeholder(tf.float32),
-}
-test_summary_op = tf.summary.merge([tf.summary.scalar(name, test_summary_dic[name]) for name in test_summary_dic.keys()])
+    saver = tf.train.Saver()
 
-train_writer = tf.summary.FileWriter(tensorboard_dir)
-
-# 4. session & saver
-sess = tf.Session()
-sess.run(tf.global_variables_initializer())
-
-saver = tf.train.Saver(max_to_keep = 2)
-
-# 5. train
-best_valid_path
-
-train_threads = []
-main_queue = Queue(20 * NUM_THREADS)
-
-for i in range(NUM_THREADS):
-    log_print('# create thread : {}'.format(i), log_txt_path)
-
-    train_thread = Teacher(labeled_data_list, unlabeled_data_list, main_queue)
-    train_thread.start()
+    #######################################################################################
+    # 8. initialize
+    #######################################################################################
+    sess.run(tf.global_variables_initializer())
     
-    train_threads.append(train_thread)
+    for labeled_generator in labeled_generators:
+        labeled_generator.set_session(sess)
+        labeled_generator.set_coordinator(coord)
+        labeled_generator.start()
 
-learning_rate = args['learning_rate']
-train_ops = [train_op, lambda_u_op, loss_op, loss_x_op, loss_u_op, accuracy_op, train_summary_op]
+        log_print('[i] start labeled generator ({})'.format(labeled_generator), log_txt_path)
 
-loss_list = []
-x_loss_list = []
-u_loss_list = []
-accuracy_list = []
-train_time = time.time()
+    for unlabeled_generator in unlabeled_generators:
+        unlabeled_generator.set_session(sess)
+        unlabeled_generator.set_coordinator(coord)
+        unlabeled_generator.start()
 
-for iter in range(1, MAX_ITERATION + 1):
+        log_print('[i] start unlabeled generator ({})'.format(unlabeled_generator), log_txt_path)    
 
-    # get batch data with Thread
-    batch_x_image_data, batch_x_label_data, batch_u_image_data = main_queue.get()
-    
-    # print(batch_x_image_data.shape)
-    # print(batch_x_label_data.shape)
-    # print(batch_u_image_data.shape)
-    
-    _feed_dict = {
-        x_image_var : batch_x_image_data, 
-        x_label_var : batch_x_label_data, 
-        u_image_var : batch_u_image_data,
-        is_training : True,
-        learning_rate_var : learning_rate,
-        global_step : iter,
-    }
-    
-    _, weight_u, loss, x_loss, u_loss, accuracy, summary = sess.run(train_ops, feed_dict = _feed_dict)
-    train_writer.add_summary(summary, iter)
-    
-    loss_list.append(loss)
-    x_loss_list.append(x_loss)
-    u_loss_list.append(u_loss)
-    accuracy_list.append(accuracy)
-    
-    if iter % LOG_ITERATION == 0:
-        loss = np.mean(loss_list)
-        x_loss = np.mean(x_loss_list)
-        u_loss = np.mean(u_loss_list)
-        accuracy = np.mean(accuracy_list)
-        train_time = int(time.time() - train_time)
+    loss_list = []
+    x_loss_list = []
+    u_loss_list = []
+    accuracy_list = []
+    train_time = time.time()
 
-        log_print('[i] iter = {}, loss = {:.4f}, weight_u = {:.2f}, x_loss = {:.4f}, u_loss = {:.4f}, accuracy = {:.2f}, train_time = {}sec'.format(iter, loss, weight_u, x_loss, u_loss, accuracy, train_time), log_txt_path)
-        
-        loss_list = []
-        x_loss_list = []
-        u_loss_list = []
-        accuracy_list = []
-        train_time = time.time()
-    
-    if iter % SAVE_ITERATION == 0:
-        valid_time = time.time()
-        valid_accuracy_list = []
-        
-        for i in range(test_iteration):
-            batch_data_list = test_data_list[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]
+    best_valid_accuracy = 0.0
+    best_valid_ckpt_path = None
 
-            batch_image_data = np.zeros((BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNEL), dtype = np.float32)
-            batch_label_data = np.zeros((BATCH_SIZE, CLASSES), dtype = np.float32)
-            
-            for i, (image, label) in enumerate(batch_data_list):
-                batch_image_data[i] = image.astype(np.float32)
-                batch_label_data[i] = label.astype(np.float32)
-            
-            _feed_dict = {
-                x_image_var : batch_image_data,
-                x_label_var : batch_label_data,
-                is_training : False
-            }
+    valid_iteration = len(valid_dataset) // flags.batch_size
 
-            accuracy = sess.run(accuracy_op, feed_dict = _feed_dict)
-            valid_accuracy_list.append(accuracy)
+    train_ops = [train_op, lambda_u_op, loss_op, loss_x_op, loss_u_op, accuracy_op, train_summary_op]
 
-        valid_time = int(time.time() - valid_time)
-        valid_accuracy = np.mean(valid_accuracy_list)
-
-        summary = sess.run(valid_accuracy_op, feed_dict = {valid_accuracy_var : valid_accuracy})
+    for iter in range(1, flags.max_iteration + 1):
+        _feed_dict = {
+            global_step : iter,
+            learning_rate_var : flags.learning_rate
+        }
+        _, weight_u, loss, x_loss, u_loss, accuracy, summary = sess.run(train_ops, feed_dict = _feed_dict)
         train_writer.add_summary(summary, iter)
+        
+        loss_list.append(loss)
+        x_loss_list.append(x_loss)
+        u_loss_list.append(u_loss)
+        accuracy_list.append(accuracy)
+        
+        if iter % flags.log_iteration == 0:
+            loss = np.mean(loss_list)
+            x_loss = np.mean(x_loss_list)
+            u_loss = np.mean(u_loss_list)
+            accuracy = np.mean(accuracy_list)
+            train_time = int(time.time() - train_time)
 
-        if best_valid_accuracy <= valid_accuracy:
-            best_valid_accuracy = valid_accuracy
-            saver.save(sess, ckpt_format.format(iter))            
+            log_print('[i] iter = {}, loss = {:.4f}, weight_u = {:.2f}, x_loss = {:.4f}, u_loss = {:.4f}, accuracy = {:.2f}, train_time = {}sec'.format(iter, loss, weight_u, x_loss, u_loss, accuracy, train_time), log_txt_path)
+            
+            loss_list = []
+            x_loss_list = []
+            u_loss_list = []
+            accuracy_list = []
+            train_time = time.time()
+        
+        if iter % flags.valid_iteration == 0:
+            valid_time = time.time()
+            valid_accuracy_list = []
+            
+            for i in range(valid_iteration):
+                batch_data_list = valid_dataset[i * flags.batch_size : (i + 1) * flags.batch_size]
 
-        log_print('[i] iter = {}, valid_accuracy = {:.2f}, best_valid_accuracy = {:.2f}, valid_time = {}sec'.format(iter, valid_accuracy, best_valid_accuracy, valid_time), log_txt_path)
+                batch_image_data = np.zeros((flags.batch_size, 32, 32, 3), dtype = np.float32)
+                batch_label_data = np.zeros((flags.batch_size, 10), dtype = np.float32)
+                
+                for i, (image, label) in enumerate(batch_data_list):
+                    batch_image_data[i] = image.astype(np.float32)
+                    batch_label_data[i] = label.astype(np.float32)
+                
+                _feed_dict = {
+                    test_image_var : batch_image_data,
+                    test_label_var : batch_label_data,
+                }
 
-for th in train_threads:
-    th.train = False
-    th.join()
+                accuracy = sess.run(test_accuracy_op, feed_dict = _feed_dict)
+                valid_accuracy_list.append(accuracy)
+
+            valid_time = int(time.time() - valid_time)
+            valid_accuracy = np.mean(valid_accuracy_list)
+
+            summary = sess.run(valid_accuracy_op, feed_dict = {valid_accuracy_var : valid_accuracy})
+            train_writer.add_summary(summary, iter)
+
+            if best_valid_accuracy <= valid_accuracy:
+                best_valid_accuracy = valid_accuracy
+                best_valid_ckpt_path = ckpt_format.format(iter)
+
+                saver.save(sess, best_valid_ckpt_path)
+
+            log_print('[i] iter = {}, valid_accuracy = {:.2f}, best_valid_accuracy = {:.2f}, valid_time = {}sec'.format(iter, valid_accuracy, best_valid_accuracy, valid_time), log_txt_path)
+    
+    saver.restore(sess, best_valid_ckpt_path)
+
+    test_time = time.time()
+    test_accuracy_list = []
+    
+    for i in range(len(test_dataset) // flags.batch_size):
+        batch_data_list = valid_dataset[i * flags.batch_size : (i + 1) * flags.batch_size]
+
+        batch_image_data = np.zeros((flags.batch_size, 32, 32, 3), dtype = np.float32)
+        batch_label_data = np.zeros((flags.batch_size, 10), dtype = np.float32)
+        
+        for i, (image, label) in enumerate(batch_data_list):
+            batch_image_data[i] = image.astype(np.float32)
+            batch_label_data[i] = label.astype(np.float32)
+        
+        _feed_dict = {
+            test_image_var : batch_image_data,
+            test_label_var : batch_label_data,
+        }
+
+        accuracy = sess.run(test_accuracy_op, feed_dict = _feed_dict)
+        test_accuracy_list.append(accuracy)
+
+    test_time = int(time.time() - test_time)
+    test_accuracy = np.mean(test_accuracy_list)
+
+    log_print('[i] test_accuracy = {:.2f}, test_time = {}sec'.format(test_accuracy, test_time), log_txt_path)
